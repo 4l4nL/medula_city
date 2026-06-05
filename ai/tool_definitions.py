@@ -32,5 +32,30 @@ HERRAMIENTAS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "proponer_escritura",
+            "description": "Propone escribir un archivo con nuevo contenido. El usuario debe confirmar antes de que se guarde.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ruta": {
+                        "type": "string",
+                        "description": "Nombre del archivo a modificar, ej: 'player.py'"
+                    },
+                    "contenido": {
+                        "type": "string",
+                        "description": "Contenido completo y correcto del archivo"
+                    },
+                    "descripcion": {
+                        "type": "string",
+                        "description": "Explicación breve de qué cambios se hicieron y por qué"
+                    }
+                },
+                "required": ["ruta", "contenido", "descripcion"]
+            }
+        }
     }
 ]

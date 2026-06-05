@@ -66,3 +66,12 @@ class Player:
                         (x + 8, y + 20, 16, 8), 3.14, 0, 2)
         # cuerpo
         pygame.draw.rect(pantalla, COLOR, (x + 6, y + w, w - 12, h - w - 8))
+
+    def obtener_posicion(self):
+        """Retorna la posición actual del jugador."""
+        return self.x, self.y
+
+    def hello(self):
+        """Hace que el personaje diga 'HI!'"""
+        print("HI!")
+        return "HI!"
