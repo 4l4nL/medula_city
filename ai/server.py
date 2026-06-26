@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import json
@@ -6,35 +6,40 @@ import openai
 import py_compile
 import tempfile
 import os
-from tools import leer_archivo, listar_archivos, escribir_archivo
+from tools import escribir_archivo, leer_archivo, listar_archivos
 from tool_definitions import HERRAMIENTAS
+from agents.arquitecto import SYSTEM_PROMPT as ARCHITECT_PROMPT
+from agents.tester import SYSTEM_PROMPT as TESTER_PROMPT
+from agents.anti_alan import SYSTEM_PROMPT as ANTI_ALAN_PROMPT
 
 app = FastAPI()
 
-EJECUTORES = {
+TOOL_EXECUTORS = {
     "leer_archivo": leer_archivo,
     "listar_archivos": listar_archivos,
 }
 
-SYSTEM_PROMPT = """You are an expert assistant for the Medula City project.
-It's a 2D game in Python + pygame where a Mexican skull character moves through a virtual world.
-Project files: main.py, game.py, player.py, room.py
+MODEL = "qwen3.6:latest"
 
-You have access to real tools. You MUST use them directly — never write JSON or text describing a tool call.
+MASTER_PROMPT = f"""You are an AI orchestrator for the Medula City project.
+A 2D game in Python + pygame with a Mexican skull character.
 
-When you receive a task:
-1. Use listar_archivos to see available files
-2. Use leer_archivo to read the relevant files
-3. Make the necessary changes and use proponer_escritura to propose saving the file
+Based on the user's message, act as the right specialist:
 
-Important rules:
-- NEVER guess file contents — always read them first
-- NEVER write incomplete files — always include the full file content
-- When proposing changes, preserve all existing code and only add/modify what's needed
-- Respond in the same language the user writes in"""
+--- ARCHITECT ---
+{ARCHITECT_PROMPT}
+
+--- TESTER ---
+{TESTER_PROMPT}
+
+--- ANTI-ALAN ---
+{ANTI_ALAN_PROMPT}
+
+Always start your response by stating which role you are taking and why.
+Use tools to read files before making any suggestions."""
 
 
-class MensajeRequest(BaseModel):
+class ChatRequest(BaseModel):
     mensaje: str
     historial: list = []
 
@@ -44,11 +49,11 @@ class ConfirmarRequest(BaseModel):
     contenido: str
 
 
-def validar_sintaxis(contenido: str) -> tuple[bool, str]:
+def validate_syntax(content: str) -> tuple[bool, str]:
     try:
         with tempfile.NamedTemporaryFile(suffix=".py", mode="w",
                                          encoding="utf-8", delete=False) as tmp:
-            tmp.write(contenido)
+            tmp.write(content)
             tmp_path = tmp.name
         py_compile.compile(tmp_path, doraise=True)
         os.unlink(tmp_path)
@@ -58,19 +63,18 @@ def validar_sintaxis(contenido: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def ejecutar_herramienta(nombre: str, argumentos: dict):
-    """Returns (resultado, es_propuesta, datos_propuesta)"""
-    if nombre == "proponer_escritura":
-        # No guardamos aún — mandamos la propuesta al frontend
-        return None, True, argumentos
+def execute_tool(name: str, arguments: dict):
+    """Returns (result, is_proposal, proposal_data)"""
+    if name == "proponer_escritura":
+        return None, True, arguments
 
-    funcion = EJECUTORES.get(nombre)
-    if not funcion:
-        return f"ERROR: herramienta '{nombre}' no existe", False, None
+    function = TOOL_EXECUTORS.get(name)
+    if not function:
+        return f"ERROR: tool '{name}' does not exist", False, None
     try:
-        return funcion(**argumentos), False, None
+        return function(**arguments), False, None
     except TypeError as e:
-        return f"ERROR: argumentos incorrectos para '{nombre}': {e}", False, None
+        return f"ERROR: wrong arguments for '{name}': {e}", False, None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -81,68 +85,65 @@ def index():
 
 @app.post("/confirmar")
 def confirmar(req: ConfirmarRequest):
-    """El usuario confirmó — validamos sintaxis y guardamos el archivo."""
-    valido, error = validar_sintaxis(req.contenido)
-    if not valido:
+    valid, error = validate_syntax(req.contenido)
+    if not valid:
         return JSONResponse({"ok": False, "error": error})
-    resultado = escribir_archivo(req.ruta, req.contenido)
-    return JSONResponse({"ok": True, "mensaje": resultado})
+    result = escribir_archivo(req.ruta, req.contenido)
+    return JSONResponse({"ok": True, "mensaje": result})
 
 
 @app.post("/chat")
-def chat(req: MensajeRequest):
-    def generar():
-        cliente = openai.OpenAI(
+def chat(req: ChatRequest):
+    def generate():
+        client = openai.OpenAI(
             base_url="http://localhost:11434/v1",
             api_key="ollama",
         )
 
-        mensajes = [{"role": "system", "content": SYSTEM_PROMPT}]
-        mensajes += req.historial
-        mensajes.append({"role": "user", "content": req.mensaje})
+        messages = [{"role": "system", "content": MASTER_PROMPT}]
+        messages += req.historial
+        messages.append({"role": "user", "content": req.mensaje})
 
         while True:
-            respuesta = cliente.chat.completions.create(
-                model="qwen3.6:latest",
-                messages=mensajes,
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
                 tools=HERRAMIENTAS,
                 tool_choice="auto",
             )
 
-            mensaje = respuesta.choices[0].message
+            message = response.choices[0].message
 
-            if mensaje.tool_calls:
-                mensajes.append(mensaje)
-                for tool_call in mensaje.tool_calls:
-                    nombre = tool_call.function.name
-                    argumentos = json.loads(tool_call.function.arguments)
+            if message.tool_calls:
+                messages.append(message)
+                for tool_call in message.tool_calls:
+                    name = tool_call.function.name
+                    arguments = json.loads(tool_call.function.arguments)
 
-                    yield f"data: {json.dumps({'tipo': 'herramienta', 'nombre': nombre})}\n\n"
+                    yield f"data: {json.dumps({'tipo': 'herramienta', 'nombre': name})}\n\n"
 
-                    resultado, es_propuesta, datos = ejecutar_herramienta(nombre, argumentos)
+                    result, is_proposal, data = execute_tool(name, arguments)
 
-                    if es_propuesta:
-                        # Mandamos la propuesta al frontend para confirmación
-                        yield f"data: {json.dumps({'tipo': 'propuesta', 'datos': datos})}\n\n"
-                        # Le decimos al modelo que la propuesta fue enviada al usuario
-                        mensajes.append({
+                    if is_proposal:
+                        yield f"data: {json.dumps({'tipo': 'propuesta', 'datos': data})}\n\n"
+                        messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": "Propuesta enviada al usuario para confirmación.",
+                            "content": "Proposal sent to user for confirmation.",
                         })
                     else:
-                        mensajes.append({
+                        messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": resultado,
+                            "content": result,
                         })
             else:
-                texto = mensaje.content or ""
-                for palabra in texto.split(" "):
-                    yield f"data: {json.dumps({'tipo': 'texto', 'contenido': palabra + ' '})}\n\n"
+                text = message.content or ""
+                for word in text.split(" "):
+                    yield f"data: {json.dumps({'tipo': 'texto', 'contenido': word + ' '})}\n\n"
 
-                mensajes.append({"role": "assistant", "content": texto})
-                yield f"data: {json.dumps({'tipo': 'fin', 'historial': mensajes[1:]})}\n\n"
+                messages.append({"role": "assistant", "content": text})
+                yield f"data: {json.dumps({'tipo': 'fin', 'historial': messages[1:]})}\n\n"
                 break
 
-    return StreamingResponse(generar(), media_type="text/event-stream")
+    return StreamingResponse(generate(), media_type="text/event-stream")

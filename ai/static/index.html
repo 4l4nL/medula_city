@@ -314,8 +314,10 @@
           if (!linea.startsWith('data: ')) continue
           const datos = JSON.parse(linea.slice(6))
 
-          if (datos.tipo === 'herramienta') {
-            agregarBurbuja(`🔧 Usando: ${datos.nombre}...`, 'herramienta')
+          if (datos.tipo === 'agente') {
+            agregarBurbuja(`${datos.label} is handling this`, 'herramienta')
+          } else if (datos.tipo === 'herramienta') {
+            agregarBurbuja(`🔧 Using: ${datos.nombre}...`, 'herramienta')
           } else if (datos.tipo === 'propuesta') {
             agregarBurbuja(`📝 Propuesta lista: ${datos.datos.ruta}`, 'herramienta')
             mostrarModal(datos.datos)

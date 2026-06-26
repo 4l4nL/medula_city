@@ -1,99 +1,76 @@
-import json
+"""Orchestrator to route user tasks to specialist agents."""
+
 import openai
-from tools import leer_archivo, listar_archivos
-from tool_definitions import HERRAMIENTAS
+from agents import arquitecto as arquitecto_mod, tester as tester_mod, anti_alan as anti_alan_mod, base_agent as base_agent_mod
 
-# Mapa: nombre de herramienta → función real de Python
-EJECUTORES = {
-    "leer_archivo": leer_archivo,
-    "listar_archivos": listar_archivos,
-}
+# Safely get prompts and runner; fall back to sensible defaults if names differ.
+ARCHITECT_PROMPT = getattr(arquitecto_mod, "SYSTEM_PROMPT", "")
+TESTER_PROMPT = getattr(tester_mod, "SYSTEM_PROMPT", "")
+ANTI_ALAN_PROMPT = getattr(anti_alan_mod, "SYSTEM_PROMPT", "")
+run_agent = getattr(base_agent_mod, "run_agent", None)
 
-SYSTEM_PROMPT = """Eres un asistente experto en el proyecto Medula City.
-Es un juego 2D en Python + pygame donde una calaverita mexicana se mueve por un mundo virtual.
-Archivos del proyecto: main.py, game.py, player.py, room.py
+MODEL = "qwen3.6:latest"
 
-Tienes acceso a herramientas reales. DEBES usarlas directamente — nunca escribas JSON ni texto describiendo una llamada.
+ROUTING_PROMPT = """You are an orchestrator for medula city.
+Your job is to read the user's message and decide which specialist agent should handle it.
 
-Cuando recibas una tarea:
-1. Usa la herramienta listar_archivos para ver los archivos disponibles
-2. Usa la herramienta leer_archivo para leer los archivos relevantes
-3. Analiza el código y explica qué cambios se necesitan con fragmentos de código concretos
+Reply with ONLY one of these words:
+-architect -> user wants to plan, design, or understand how to implement something.
+-tester -> user wants to review code, find bug, or check if something is correct.
+-anti_alan -> user wants to add many features, seems to be over-engineering, or losing focus
+-general -> anything else
 
-Reglas importantes:
-- NUNCA escribas JSON como respuesta — usa las herramientas directamente
-- NUNCA adivines el contenido de un archivo — siempre léelo primero
-- Tu rol es leer, analizar y sugerir — no modificas archivos
-- Responde en español"""
+Reply with the single word only. No explanation."""
 
-
-def ejecutar_herramienta(nombre: str, argumentos: dict) -> str:
-    """Encuentra la función correcta y la ejecuta."""
-    funcion = EJECUTORES.get(nombre)
-    if not funcion:
-        return f"ERROR: herramienta '{nombre}' no existe"
-    try:
-        return funcion(**argumentos)
-    except TypeError as e:
-        return f"ERROR: argumentos incorrectos para '{nombre}': {e}"
-
-
-def orquestar(tarea: str) -> str:
-    """
-    El orquestador principal.
-    Recibe una tarea en lenguaje natural y coordina herramientas hasta completarla.
-    """
-    cliente = openai.OpenAI(
+def route(task: str) -> str:
+    """Ask the LLM which agent should handle this task."""
+    client = openai.OpenAI(
         base_url="http://localhost:11434/v1",
-        api_key="ollama",  # Ollama no necesita key real, pero el campo es obligatorio
+        api_key="ollama",
     )
 
-    mensajes = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": tarea},
-    ]
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": ROUTING_PROMPT},
+            {"role": "user", "content": task},
+        ],
+    )
 
-    print(f"\n🎯 Tarea: {tarea}\n")
-    print("─" * 50)
+    # Defensive access in case the client response shape differs
+    try:
+        return response.choices[0].message.content.strip().lower()
+    except Exception:
+        # fallback to a default route
+        return "general"
 
-    # El loop ReAct — repite hasta que el modelo decida que terminó
-    while True:
-        respuesta = cliente.chat.completions.create(
-            model="qwen3.6:latest",
-            messages=mensajes,
-            tools=HERRAMIENTAS,
-            tool_choice="auto",
-        )
+AGENTS = {
+    "architect": ARCHITECT_PROMPT,
+    "tester": TESTER_PROMPT,
+    "anti_alan": ANTI_ALAN_PROMPT,
+    "general": ARCHITECT_PROMPT,
+}
 
-        mensaje = respuesta.choices[0].message
+AGENT_LABELS = {
+    "architect": "🏛️ Architect",
+    "tester": "🧪 Tester",
+    "anti_alan": "🛑 Anti-Alan",
+    "general": "🤖 General",
+}
 
-        # ¿El modelo quiere usar una herramienta?
-        if mensaje.tool_calls:
-            # Agregamos la respuesta del modelo al historial
-            mensajes.append(mensaje)
+def orchestrate(task: str) -> str:
+    """Main entry point. Routes the task to the right agent and returns the response."""
+    agent = route(task)
 
-            for tool_call in mensaje.tool_calls:
-                nombre = tool_call.function.name
-                argumentos = json.loads(tool_call.function.arguments)
+    if agent not in AGENTS:
+        agent = "general"
 
-                print(f"🔧 Usando: {nombre}({argumentos})")
+    print(f"\n{AGENT_LABELS[agent]} is handling this task\n")
+    print("_" * 50)
 
-                resultado = ejecutar_herramienta(nombre, argumentos)
+    system_prompt = AGENTS[agent]
 
-                # Preview del resultado en consola (máx 120 caracteres)
-                preview = resultado[:120].replace("\n", " ")
-                print(f"   → {preview}...\n")
+    if run_agent is None:
+        return "run_agent not available"
 
-                # Agregamos el resultado al historial para que el modelo lo lea
-                mensajes.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": resultado,
-                })
-
-        # ¿El modelo ya terminó?
-        else:
-            respuesta_final = mensaje.content or ""
-            print("✅ Tarea completada:\n")
-            print(respuesta_final)
-            return respuesta_final
+    return run_agent(system_prompt, task, MODEL)

@@ -1,4 +1,5 @@
-from orchestrator import orquestar
+# ai/run.py
+from orchestrator import orchestrate
 
-# Escribe aqui tu tarea y corre: python run.py
-orquestar("Lee player.py y agrega un método llamado obtener_posicion() que devuelva (self.x, self.y).")
+result = orchestrate("review player.py and tell me if there are any bugs")
+print(result)
